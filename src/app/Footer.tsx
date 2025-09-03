@@ -61,7 +61,7 @@ export default function Footer() {
                   : isCheckingAuth
                     ? <Spinner size={16} className="translate-y-[2px]" />
                     : SHOW_REPO_LINK
-                      ? <RepoLink />
+                      ? null
                       : <Link href={PATH_ADMIN_PHOTOS}>
                         {appText.nav.admin}
                       </Link>}
