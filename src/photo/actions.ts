@@ -1,7 +1,6 @@
 'use server';
 
 import {
-  deletePhoto,
   insertPhoto,
   deletePhotoTagGlobally,
   updatePhoto,
@@ -15,8 +14,8 @@ import {
   getPhotosNeedingRecipeTitleCount,
   updateColorDataForPhoto,
   getColorDataForPhotos,
-} from '@/photo/db/query';
-import { PhotoQueryOptions, areOptionsSensitive } from './db';
+} from '@/photo/query';
+import { PhotoQueryOptions, areOptionsSensitive } from '@/db';
 import {
   FIELDS_TO_NOT_OVERWRITE_WITH_NULL_DATA_ON_SYNC,
   PhotoFormData,
@@ -39,10 +38,12 @@ import {
   PATH_ADMIN_TAGS,
   PATH_ROOT,
   pathForPhoto,
+  pathForTag,
 } from '@/app/path';
 import {
   blurImageFromUrl,
   convertFormDataToPhotoDbInsertAndLookupRecipeTitle,
+  deletePhotoAndFiles,
   extractImageDataFromBlobPath,
   propagateRecipeTitleIfNecessary,
 } from './server';
@@ -58,7 +59,7 @@ import {
 } from '@/app/config';
 import { generateAiImageQueries } from './ai/server';
 import { createStreamableValue } from '@ai-sdk/rsc';
-import { convertUploadToPhoto } from './storage';
+import { convertUploadToPhoto } from './storage/server';
 import { UrlAddStatus } from '@/admin/AdminUploadsClient';
 import { convertStringToArray } from '@/utility/string';
 import { after } from 'next/server';
@@ -66,6 +67,14 @@ import {
   getColorFieldsForImageUrl,
   getColorFieldsForPhotoDbInsert,
 } from '@/photo/color/server';
+import { shouldBackfillPhotoStorage } from './update/server';
+import { getAlbumTitlesFromFormData } from '@/album/form';
+import {
+  addAlbumTitlesToPhoto,
+  createAlbumsAndGetIds,
+  upgradeTagToAlbum,
+} from '@/album/server';
+import { addPhotoAlbumIds } from '@/album/query';
 
 // Private actions
 
@@ -73,18 +82,20 @@ export const createPhotoAction = async (formData: FormData) =>
   runAuthenticatedAdminServerAction(async () => {
     const shouldStripGpsData = formData.get('shouldStripGpsData') === 'true';
 
-    const photo = await convertFormDataToPhotoDbInsertAndLookupRecipeTitle(
-      formData,
-    );
+    const photo =
+      await convertFormDataToPhotoDbInsertAndLookupRecipeTitle(formData);
+
+    const albumTitles = getAlbumTitlesFromFormData(formData);
 
     const updatedUrl = await convertUploadToPhoto({
-      urlOrigin: photo.url,
+      uploadUrl: photo.url,
       shouldStripGpsData,
     });
     
     if (updatedUrl) {
       photo.url = updatedUrl;
       await insertPhoto(photo);
+      await addAlbumTitlesToPhoto(albumTitles, photo.id, false);
       await propagateRecipeTitleIfNecessary(formData, photo);
       revalidateAllKeysAndPaths();
       redirect(PATH_ADMIN_PHOTOS);
@@ -97,6 +108,7 @@ export const createPhotoAction = async (formData: FormData) =>
 const addUpload = async ({
   url,
   title: _title,
+  albumIds = [],
   tags: _tags,
   favorite,
   hidden,
@@ -109,6 +121,7 @@ const addUpload = async ({
 }:{
   url: string
   title?: string
+  albumIds?: string[]
   tags?: string
   favorite?: string
   hidden?: string
@@ -174,7 +187,7 @@ const addUpload = async ({
     onStreamUpdate?.('Transferring to photo storage');
 
     const updatedUrl = await convertUploadToPhoto({
-      urlOrigin: url,
+      uploadUrl: url,
       fileBytes,
       shouldStripGpsData,
     });
@@ -185,6 +198,9 @@ const addUpload = async ({
         await convertFormDataToPhotoDbInsertAndLookupRecipeTitle(form);
       photo.url = updatedUrl;
       await insertPhoto(photo);
+      if (albumIds.length > 0) {
+        await addPhotoAlbumIds([photo.id], albumIds);
+      }
       if (shouldRevalidateAllKeysAndPaths) {
         after(revalidateAllKeysAndPaths);
       }
@@ -202,6 +218,7 @@ export const addUploadsAction = async ({
   uploadUrls,
   uploadTitles,
   shouldRevalidateAllKeysAndPaths = true,
+  albumTitles,
   tags,
   favorite,
   hidden,
@@ -210,11 +227,12 @@ export const addUploadsAction = async ({
   takenAtNaiveLocal,
 }: Omit<
   Parameters<typeof addUpload>[0],
-  'url' | 'onStreamUpdate' | 'onFinish'
+  'url' | 'onStreamUpdate' | 'onFinish' | 'albumIds'
 > & {
   uploadUrls: string[]
   uploadTitles: string[]
   shouldRevalidateAllKeysAndPaths?: boolean
+  albumTitles?: string[]
 }) =>
   runAuthenticatedAdminServerAction(async () => {
     const PROGRESS_TASK_COUNT = AI_CONTENT_GENERATION_ENABLED ? 5 : 4;
@@ -236,6 +254,10 @@ export const addUploadsAction = async ({
         progress: ++progress / PROGRESS_TASK_COUNT,
       });
 
+    const albumIds = albumTitles
+      ? await createAlbumsAndGetIds(albumTitles)
+      : [];
+
     (async () => {
       try {
         for (const [index, url] of uploadUrls.entries()) {
@@ -247,6 +269,7 @@ export const addUploadsAction = async ({
           await addUpload({
             url,
             title,
+            albumIds,
             tags,
             favorite,
             hidden,
@@ -278,13 +301,13 @@ export const updatePhotoAction = async (formData: FormData) =>
     const photo =
       await convertFormDataToPhotoDbInsertAndLookupRecipeTitle(formData);
 
+    const albumTitles = getAlbumTitlesFromFormData(formData);
+    await addAlbumTitlesToPhoto(albumTitles, photo.id);
+   
     let urlToDelete: string | undefined;
-    if (photo.hidden && photo.url.includes(photo.id)) {
-      // Backfill:
-      // Anonymize storage url on update if necessary by
-      // re-running image upload transfer logic
+    if (await shouldBackfillPhotoStorage(photo)) {
       const url = await convertUploadToPhoto({
-        urlOrigin: photo.url,
+        uploadUrl: photo.url,
         shouldDeleteOrigin: false,
       });
       if (url) {
@@ -301,7 +324,7 @@ export const updatePhotoAction = async (formData: FormData) =>
         await propagateRecipeTitleIfNecessary(formData, photo);
       });
 
-    revalidatePhoto(photo.id);
+    revalidateAllKeysAndPaths();
 
     redirect(PATH_ADMIN_PHOTOS);
   });
@@ -356,7 +379,7 @@ export const deletePhotosAction = async (photoIds: string[]) =>
     for (const photoId of photoIds) {
       const photo = await getPhoto(photoId, true);
       if (photo) {
-        await deletePhoto(photoId).then(() => deleteFile(photo.url));
+        await deletePhotoAndFiles(photoId, photo.url);
       }
     }
     revalidateAllKeysAndPaths();
@@ -368,21 +391,31 @@ export const deletePhotoAction = async (
   shouldRedirect?: boolean,
 ) =>
   runAuthenticatedAdminServerAction(async () => {
-    await deletePhoto(photoId).then(() => deleteFile(photoUrl));
+    await deletePhotoAndFiles(photoId, photoUrl);
     revalidateAllKeysAndPaths();
     if (shouldRedirect) {
       redirect(PATH_ROOT);
     }
   });
 
-export const deletePhotoTagGloballyAction = async (formData: FormData) =>
+export const deletePhotoTagGloballyFormAction = async (formData: FormData) =>
   runAuthenticatedAdminServerAction(async () => {
     const tag = formData.get('tag') as string;
-
     await deletePhotoTagGlobally(tag);
-
     revalidatePhotosKey();
     revalidateAdminPaths();
+  });
+
+export const deletePhotoTagGloballyAction = async (
+  tag: string,
+  currentPath?: string,
+) =>
+  runAuthenticatedAdminServerAction(async () => {
+    await deletePhotoTagGlobally(tag);
+    revalidateAllKeysAndPaths();
+    if (currentPath === pathForTag(tag)) {
+      redirect(PATH_ROOT);
+    }
   });
 
 export const renamePhotoTagGloballyAction = async (formData: FormData) =>
@@ -397,6 +430,11 @@ export const renamePhotoTagGloballyAction = async (formData: FormData) =>
       redirect(PATH_ADMIN_TAGS);
     }
   });
+
+export const upgradeTagToAlbumAction = async (tag: string) =>
+  runAuthenticatedAdminServerAction(async () =>
+    upgradeTagToAlbum(tag).then(revalidateAllKeysAndPaths),
+  );
 
 export const getPhotosNeedingRecipeTitleCountAction = async (
   recipeData: string,
@@ -493,7 +531,15 @@ export const getExifDataAction = async (
 // - strip GPS data if necessary
 // - update blur data (or destroy if blur is disabled)
 // - generate AI text data, if enabled, and auto-generated fields are empty
-export const syncPhotoAction = async (photoId: string, isBatch?: boolean) =>
+export const syncPhotoAction = async (
+  photoId: string, {
+    isBatch,
+    updateMode,
+  }: {
+    isBatch?: boolean,
+    updateMode?: boolean,
+  } = {},
+) =>
   runAuthenticatedAdminServerAction(async () => {
     const photo = await getPhoto(photoId ?? '', true);
 
@@ -507,15 +553,21 @@ export const syncPhotoAction = async (photoId: string, isBatch?: boolean) =>
         includeInitialPhotoFields: false,
         generateBlurData: BLUR_ENABLED,
         generateResizedImage: AI_CONTENT_GENERATION_ENABLED,
+        // If in update mode, only update color fields if necessary
+        updateColorFields: !(
+          updateMode &&
+          photo.colorData !== undefined &&
+          photo.colorSort !== undefined
+        ),
       });
 
       let urlToDelete: string | undefined;
       if (formDataFromExif) {
-        if (photo.url.includes(photo.id) || shouldStripGpsData) {
+        if (await shouldBackfillPhotoStorage(photo) || shouldStripGpsData) {
           // Anonymize storage url on update if necessary by
           // re-running image upload transfer logic
           const url = await convertUploadToPhoto({
-            urlOrigin: photo.url,
+            uploadUrl: photo.url,
             fileBytes,
             shouldStripGpsData,
             shouldDeleteOrigin: false,
@@ -577,7 +629,7 @@ export const syncPhotosAction = async (photosToSync: {
     for (const { photoId, onlySyncColorData } of photosToSync) {
       await (onlySyncColorData
         ? storeColorDataForPhotoAction(photoId)
-        : syncPhotoAction(photoId, true));
+        : syncPhotoAction(photoId, { isBatch: true }));
     }
     revalidateAllKeysAndPaths();
   });

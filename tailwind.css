@@ -266,6 +266,8 @@ html {
       text-medium
       bg-gray-100 dark:bg-gray-900
       pointer-events-none
+      read-only:bg-gray-100
+      dark:read-only:bg-gray-900 dark:read-only:text-gray-400
   }
   input[type=file] {
     @apply
@@ -315,10 +317,9 @@ html {
   }
   button.primary, .button.primary {
     @apply
-      text-invert
+      text-white dark:text-black
       bg-gray-900 dark:bg-gray-100
       disabled:text-dim
-      font-medium
       disabled:bg-gray-100 dark:disabled:bg-gray-900
       disabled:border-gray-200 disabled:dark:border-gray-700
       border-gray-900 dark:border-gray-100
