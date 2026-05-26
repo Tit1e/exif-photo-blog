@@ -109,11 +109,13 @@ export default function AdminAppConfigurationClient({
   showAboutPage,
   showKeyboardShortcutTooltips,
   showExifInfo,
+  alwaysShowExposureComp,
   showZoomControls,
   showTakenAtTimeHidden,
   showRepoLink,
   // Grid
   isGridHomepageEnabled,
+  isMasonryGridEnabled,
   gridAspectRatio,
   hasGridAspectRatio,
   hasHighGridDensity,
@@ -286,8 +288,7 @@ export default function AdminAppConfigurationClient({
                 Postgres:
                 {' '}
                 <AdminLink
-                // eslint-disable-next-line max-len
-                  href="https://vercel.com/docs/postgres#create-a-postgres-database"
+                  href="https://vercel.com/docs/postgres"
                   externalIcon
                 >
                   create database
@@ -319,14 +320,13 @@ export default function AdminAppConfigurationClient({
                   {labelForStorage('vercel-blob')}:
                   {' '}
                   <AdminLink
-                  // eslint-disable-next-line max-len
-                    href="https://vercel.com/docs/storage/vercel-blob/quickstart#create-a-blob-store"
+                    href="https://vercel.com/docs/vercel-blob"
                     externalIcon
                   >
                     create store
                   </AdminLink>
-                  {' '} 
-                  and connect to project
+                  {' '}
+                  (configured as public) and connect to project
                 </>,
                 )}
               {hasCloudflareR2Storage
@@ -806,6 +806,15 @@ export default function AdminAppConfigurationClient({
             {renderEnvVars(['NEXT_PUBLIC_HIDE_EXIF_DATA'])}
           </ChecklistRow>
           <ChecklistRow
+            title="Always show exposure compensation"
+            status={alwaysShowExposureComp}
+            optional
+          >
+            Set environment variable to {'"1"'} to always show
+            exposure compensation even when {'it\'s'} 0ev
+            {renderEnvVars(['NEXT_PUBLIC_ALWAYS_SHOW_EXPOSURE_COMP'])}
+          </ChecklistRow>
+          <ChecklistRow
             title="Show zoom controls"
             status={showZoomControls}
             optional
@@ -842,6 +851,14 @@ export default function AdminAppConfigurationClient({
             Set environment variable to {'"1"'} to show grid layout
             on homepage
             {renderEnvVars(['NEXT_PUBLIC_GRID_HOMEPAGE'])}
+          </ChecklistRow>
+          <ChecklistRow
+            title="Masonry grid"
+            status={isMasonryGridEnabled}
+            optional
+          >
+            Set environment variable to {'"1"'} to show masonry grid layout
+            {renderEnvVars(['NEXT_PUBLIC_MASONRY_GRID'])}
           </ChecklistRow>
           <ChecklistRow
             title={`Grid aspect ratio: ${gridAspectRatio}`}
